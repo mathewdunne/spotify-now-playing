@@ -12,6 +12,16 @@ interface TrackInfo {
 
 const KV_TOKEN_KEY = 'spotify_token';
 
+function sendResponse(data: any, status: number = 200): Response {
+    return new Response(JSON.stringify(data), {
+        headers: { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*' 
+        },
+        status: status,
+    });
+}
+
 export default {
     async fetch(request, env, ctx): Promise<Response> {
         try {
@@ -35,10 +45,7 @@ export default {
             // Spotify returns null or undefined if the user is offline, private session, or paused for a long time
 			// Also check if the currently playing type is not a track (e.g., podcast)
             if (!response || !response.item || !response.is_playing || response.currently_playing_type !== 'track') {
-                return new Response(JSON.stringify({ isPlaying: false }), {
-                    headers: { 'Content-Type': 'application/json' },
-                    status: 200,
-                });
+                return sendResponse({ isPlaying: false });
             }
 
             // We now know it is a Track, so we can safely cast it.
@@ -55,21 +62,12 @@ export default {
             };
 
             // Return Success
-            return new Response(JSON.stringify(trackInfo), {
-                headers: { 
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*' 
-                },
-                status: 200,
-            });
+            return sendResponse(trackInfo);
 
         } catch (error) {
             console.error('Spotify Fetch Error:', error);
             // Return a safe fallback so the worker doesn't throw a 500 error
-            return new Response(JSON.stringify({ isPlaying: false, error: 'Failed to fetch data' }), {
-                headers: { 'Content-Type': 'application/json' },
-                status: 200, 
-            });
+            return sendResponse({ isPlaying: false, error: 'Failed to fetch data' });
         }
     },
 } satisfies ExportedHandler<Env>;
