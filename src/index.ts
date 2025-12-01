@@ -17,14 +17,16 @@ export default {
         try {
 			// Initialize SDK with token from KV
 			const token = await env.KV.get(KV_TOKEN_KEY) || "";
-			console.log(token);
+            const parsedToken = JSON.parse(token) as AccessToken;
 
-			const sdk = SpotifyApi.withAccessToken(env.SPOTIFY_CLIENT_ID, JSON.parse(token) as AccessToken);
+			const sdk = SpotifyApi.withAccessToken(env.SPOTIFY_CLIENT_ID, parsedToken);
 			
 			// Save new token to KV
 			const newToken = await sdk.getAccessToken();
-			await env.KV.put(KV_TOKEN_KEY, JSON.stringify(newToken));
-			console.log(JSON.stringify(newToken));
+            if (newToken != null && newToken !== parsedToken) {
+                await env.KV.put(KV_TOKEN_KEY, JSON.stringify(newToken));
+                console.log(JSON.stringify(newToken));
+            }
 
             // Fetch the data
             const response = await sdk.player.getCurrentlyPlayingTrack();
