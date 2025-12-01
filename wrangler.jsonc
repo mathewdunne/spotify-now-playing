@@ -31,7 +31,7 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-	"vars": { "SPOTIFY_CLIENT_ID": "bce3d09e4fcc4f72992ab6b363574117" }
+	"vars": { "SPOTIFY_CLIENT_ID": "bce3d09e4fcc4f72992ab6b363574117" },
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
@@ -46,4 +46,10 @@
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
 	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
+	"routes": [
+		{
+			"pattern": "spotify.mathewdunne.ca",
+			"custom_domain": true
+		},
+	],
 }
