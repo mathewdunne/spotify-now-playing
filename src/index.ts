@@ -1,5 +1,5 @@
 
-import { SpotifyApi, Track, AccessToken, Scopes } from '@spotify/web-api-ts-sdk';
+import { SpotifyApi, Track, AccessToken } from '@spotify/web-api-ts-sdk';
 
 interface TrackInfo {
     title: string;
@@ -30,15 +30,8 @@ export default {
             const parsedToken = JSON.parse(token) as AccessToken;
 
 			const sdk = SpotifyApi.withAccessToken(env.SPOTIFY_CLIENT_ID, parsedToken);
-			
-			// Save new token to KV
-			const newToken = await sdk.getAccessToken();
-            if (newToken != null && newToken !== parsedToken) {
-                await env.KV.put(KV_TOKEN_KEY, JSON.stringify(newToken));
-                console.log(JSON.stringify(newToken));
-            }
 
-            // Fetch the data
+            // Fetch the data - SDK will automatically refresh token if needed
             const response = await sdk.player.getCurrentlyPlayingTrack();
 
             // Handle "Nothing Playing" state
@@ -56,10 +49,16 @@ export default {
                 title: trackItem.name,
                 artist: trackItem.artists.map((artist) => artist.name).join(', '),
                 album: trackItem.album.name,
-                albumImageUrl: trackItem.album.images[0]?.url ?? '', 
+                albumImageUrl: trackItem.album.images[0]?.url ?? '',
                 url: trackItem.external_urls.spotify,
                 isPlaying: true,
             };
+
+			// Save the token back to KV (it may have been refreshed during the API call)
+			const currentToken = await sdk.getAccessToken();
+			if (currentToken) {
+				await env.KV.put(KV_TOKEN_KEY, JSON.stringify(currentToken));
+			}
 
             // Return Success
             return sendResponse(trackInfo);
