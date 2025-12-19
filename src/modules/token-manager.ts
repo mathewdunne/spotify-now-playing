@@ -1,12 +1,13 @@
 import { KV_KEYS, SPOTIFY_API } from '../constants';
 import type { AccessToken } from '../types/spotify';
+import { AuthenticationError } from '../types/errors';
 
 const TOKEN_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function getValidToken(kv: KVNamespace, clientId: string): Promise<AccessToken> {
 	const tokenJson = await kv.get(KV_KEYS.TOKEN);
 	if (!tokenJson) {
-		throw new Error('No token found in KV storage');
+		throw new AuthenticationError('No token found in KV storage');
 	}
 
 	const token: AccessToken = JSON.parse(tokenJson);
@@ -41,7 +42,7 @@ async function refreshAccessToken(clientId: string, refreshToken: string): Promi
 	});
 
 	if (!response.ok) {
-		throw new Error(`Token refresh failed: ${response.status}`);
+		throw new AuthenticationError(`Token refresh failed: ${response.status}`);
 	}
 
 	const data = (await response.json()) as {

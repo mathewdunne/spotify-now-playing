@@ -2,6 +2,7 @@ import { getCachedTrack, setCachedTrack } from './modules/cache';
 import { getValidToken } from './modules/token-manager';
 import { getCurrentlyPlaying } from './modules/spotify-client';
 import { createResponse, formatTrackInfo } from './modules/response-formatter';
+import { AuthenticationError, SpotifyApiError } from './types/errors';
 
 export default {
 	async fetch(_request, env, _ctx): Promise<Response> {
@@ -44,7 +45,25 @@ export default {
 			return createResponse(trackInfo);
 		} catch (error) {
 			console.error('Spotify Fetch Error:', error);
-			return createResponse({ isPlaying: false, error: 'Failed to fetch data' });
+
+			// Handle authentication errors (401)
+			if (error instanceof AuthenticationError) {
+				return createResponse({ isPlaying: false, error: error.message }, 401);
+			}
+
+			// Handle Spotify API errors (503 for service issues)
+			if (error instanceof SpotifyApiError) {
+				return createResponse({ isPlaying: false, error: error.message }, 503);
+			}
+
+			// Handle all other errors (500)
+			return createResponse(
+				{
+					isPlaying: false,
+					error: error instanceof Error ? error.message : 'Failed to fetch data',
+				},
+				500
+			);
 		}
 	},
 } satisfies ExportedHandler<Env>;

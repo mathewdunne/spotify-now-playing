@@ -40,6 +40,7 @@ The codebase is organized into distinct modules for separation of concerns:
 - **`src/modules/response-formatter.ts`**: Response construction and data transformation.
 - **`src/constants.ts`**: Centralized configuration (KV keys, TTLs, API URLs).
 - **`src/types/spotify.ts`**: TypeScript type definitions.
+- **`src/types/errors.ts`**: Custom error classes for proper HTTP status codes.
 
 ### Token Management (Manual Implementation)
 
@@ -106,14 +107,40 @@ Or when nothing is playing:
 { isPlaying: false }
 ```
 
-All responses include CORS header `Access-Control-Allow-Origin: *` and return HTTP 200 (even on errors to avoid breaking clients).
+All responses include CORS header `Access-Control-Allow-Origin: *`.
+
+## HTTP Status Codes
+
+The API returns appropriate HTTP status codes:
+
+- **200 OK**: Successful response (track playing or nothing playing)
+- **401 Unauthorized**: Authentication/token errors (no token found, token refresh failed)
+- **500 Internal Server Error**: Unexpected errors (parsing errors, network failures)
+- **503 Service Unavailable**: Spotify API errors (API is down or returning errors)
 
 ## Error Handling
 
-All errors are caught in the main handler and return graceful fallbacks:
-- Returns `{isPlaying: false, error: 'Failed to fetch data'}`
-- Always returns HTTP 200 (never throws 500 errors)
-- Logs errors to console for debugging
+All errors are caught in the main handler and return graceful JSON responses:
+
+**Authentication Errors (401)**:
+```typescript
+{ isPlaying: false, error: "No token found in KV storage" }
+{ isPlaying: false, error: "Token refresh failed: 400" }
+```
+
+**Spotify API Errors (503)**:
+```typescript
+{ isPlaying: false, error: "Spotify API error: 429" }
+```
+
+**Other Errors (500)**:
+```typescript
+{ isPlaying: false, error: "Failed to fetch data" }
+```
+
+Error types defined in `src/types/errors.ts`:
+- `AuthenticationError`: Token-related failures
+- `SpotifyApiError`: Spotify API communication issues
 
 ## Important Notes
 
