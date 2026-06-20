@@ -2,10 +2,43 @@ import { getCachedTrack, setCachedTrack } from './modules/cache';
 import { getValidToken } from './modules/token-manager';
 import { getCurrentlyPlaying } from './modules/spotify-client';
 import { createResponse, formatTrackInfo } from './modules/response-formatter';
-import { AuthenticationError, SpotifyApiError } from './types/errors';
+import { handleLogin, handleCallback } from './modules/auth';
+import { notifyServiceDown } from './modules/notifier';
+import { AuthenticationError, ReauthRequiredError, SpotifyApiError } from './types/errors';
+
+// Builds the Discord message for a caught backend error. Each message is tagged with the
+// request's hostname so multiple deployments self-identify in a shared channel. Auth
+// failures include the /login URL so the fix is one click away.
+function buildAlertMessage(error: unknown, request: Request): string {
+	const url = new URL(request.url);
+	const host = url.hostname;
+	const loginUrl = `${url.origin}/login`;
+
+	if (error instanceof ReauthRequiredError) {
+		return `⚠️ [${host}] Spotify now-playing: refresh token expired. Re-authenticate: ${loginUrl}`;
+	}
+	if (error instanceof AuthenticationError) {
+		return `⚠️ [${host}] Spotify now-playing auth error: ${error.message}. Re-authenticate: ${loginUrl}`;
+	}
+	if (error instanceof SpotifyApiError) {
+		return `⚠️ [${host}] Spotify now-playing: ${error.message}`;
+	}
+	return `⚠️ [${host}] Spotify now-playing: ${error instanceof Error ? error.message : 'Failed to fetch data'}`;
+}
 
 export default {
-	async fetch(_request, env, _ctx): Promise<Response> {
+	async fetch(request, env, ctx): Promise<Response> {
+		const { pathname } = new URL(request.url);
+
+		// Access-protected admin routes for (re-)authentication.
+		if (pathname === '/login') {
+			return handleLogin(request, env);
+		}
+		if (pathname === '/callback') {
+			return handleCallback(request, env);
+		}
+
+		// Default route: public now-playing endpoint.
 		try {
 			const now = Date.now();
 
@@ -45,6 +78,9 @@ export default {
 			return createResponse(trackInfo);
 		} catch (error) {
 			console.error('Spotify Fetch Error:', error);
+
+			// Alert on any backend failure (fire-and-forget, throttled inside the notifier).
+			ctx.waitUntil(notifyServiceDown(env.KV, buildAlertMessage(error, request)));
 
 			// Handle authentication errors (401)
 			if (error instanceof AuthenticationError) {
