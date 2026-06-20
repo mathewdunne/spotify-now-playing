@@ -8,7 +8,7 @@ export const KV_KEYS = {
 } as const;
 
 export const CACHE_CONFIG = {
-	FRESH_TTL_MS: 20 * 1000, // 20 seconds
+	FRESH_TTL_MS: 5 * 1000, // 5 seconds
 	STALE_TTL_MS: 20 * 60 * 1000, // 20 minutes
 } as const;
 
