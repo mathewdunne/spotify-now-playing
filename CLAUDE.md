@@ -55,7 +55,7 @@ The worker implements manual OAuth token refresh without using the Spotify SDK:
 3. **Expiry Check**: Before each API call, checks if `token.expires < now + 5min` (5-minute buffer prevents edge cases).
 4. **Refresh Flow**: When expired, POSTs to `https://accounts.spotify.com/api/token` with `grant_type=refresh_token`.
 5. **Token Persistence**: Immediately saves refreshed token to KV (refresh_token may or may not be updated by Spotify).
-6. **Expired Refresh Token (`invalid_grant`)**: Spotify refresh tokens have a 6-month lifetime (enforced for existing apps from 2026-07-20). When the token endpoint returns `invalid_grant`, the worker throws `ReauthRequiredError`, **discards the dead token from KV**, and does **not** retry. The user must re-authenticate via `/login`. See `toAccessToken` for the shared token-shaping helper used by both refresh and the `/callback` exchange.
+6. **Expired Refresh Token (`invalid_grant`)**: Spotify refresh tokens have a 6-month lifetime (enforced for existing apps from 2026-07-20). When the token endpoint returns `invalid_grant`, the worker throws `ReauthRequiredError`, **discards the dead token from KV**, and does **not** retry. The user must re-authenticate via `/login`. **Concurrency guard**: before discarding, it re-reads KV and, if the stored `refresh_token` has changed (a sibling request already refreshed — possible when Spotify rotates refresh tokens), returns that token instead of deleting, so a refresh race can't nuke a healthy token. See `toAccessToken` for the shared token-shaping helper used by both refresh and the `/callback` exchange.
 
 See `src/modules/token-manager.ts` for implementation details.
 

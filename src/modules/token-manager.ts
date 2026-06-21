@@ -50,9 +50,22 @@ export async function getValidToken(kv: KVNamespace, clientId: string): Promise<
 	try {
 		refreshedToken = await refreshAccessToken(clientId, token.refresh_token);
 	} catch (error) {
-		// The refresh token is dead (6-month expiry). Discard it so the next request fails
-		// cleanly with "no token" until the user re-authenticates via /login.
+		// invalid_grant normally means the refresh token is dead (6-month expiry), so we discard
+		// it and let the next request fail cleanly with "no token" until the user re-auths via
+		// /login. But concurrent requests can both refresh with the same refresh_token; if Spotify
+		// rotates it, the loser gets invalid_grant even though a sibling just minted a healthy
+		// token. So before deleting, re-read KV: if the stored refresh_token changed, another
+		// request already refreshed — return that token instead of nuking it. (KV is eventually
+		// consistent, so this closes most of the race, not all — a Durable Object would be
+		// airtight; same trade-off as notifier.ts.)
 		if (error instanceof ReauthRequiredError) {
+			const currentJson = await kv.get(KV_KEYS.TOKEN);
+			if (currentJson) {
+				const current: AccessToken = JSON.parse(currentJson);
+				if (current.refresh_token !== token.refresh_token) {
+					return current;
+				}
+			}
 			await kv.delete(KV_KEYS.TOKEN);
 		}
 		throw error;

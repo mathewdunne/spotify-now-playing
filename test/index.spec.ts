@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext, fetchMock } from '
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index';
 import { notifyServiceDown, markServiceRecovered } from '../src/modules/notifier';
+import { getValidToken } from '../src/modules/token-manager';
 import { KV_KEYS } from '../src/constants';
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -102,6 +103,61 @@ describe('routing', () => {
 
 		expect(response.status).toBe(404);
 		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+	});
+});
+
+describe('token manager', () => {
+	it('does not delete the token on invalid_grant if a concurrent request already refreshed it', async () => {
+		const expired = { access_token: 'a0', token_type: 'Bearer', expires_in: 3600, refresh_token: 'RT0', expires: Date.now() - 1000 };
+		const refreshedBySibling = { access_token: 'a1', token_type: 'Bearer', expires_in: 3600, refresh_token: 'RT1', expires: Date.now() + 3600_000 };
+
+		// First read returns the stale token (triggers a refresh); the catch's re-read returns the
+		// token a sibling already rotated in, so the guard should keep it instead of deleting.
+		let getCount = 0;
+		let deleted = false;
+		const kv = {
+			get: async (key: string) => {
+				if (key !== KV_KEYS.TOKEN) return null;
+				getCount += 1;
+				return JSON.stringify(getCount === 1 ? expired : refreshedBySibling);
+			},
+			put: async () => {},
+			delete: async (key: string) => {
+				if (key === KV_KEYS.TOKEN) deleted = true;
+			},
+		} as unknown as KVNamespace;
+
+		// The loser's refresh (with RT0) gets invalid_grant because the sibling already rotated it.
+		fetchMock.get('https://accounts.spotify.com').intercept({ path: '/api/token', method: 'POST' }).reply(400, { error: 'invalid_grant' });
+
+		const result = await getValidToken(kv, 'client-id');
+
+		expect(result.refresh_token).toBe('RT1');
+		expect(result.access_token).toBe('a1');
+		expect(deleted).toBe(false);
+		fetchMock.assertNoPendingInterceptors();
+	});
+
+	it('deletes the token on invalid_grant when the refresh token is genuinely dead', async () => {
+		const expired = { access_token: 'a0', token_type: 'Bearer', expires_in: 3600, refresh_token: 'RT0', expires: Date.now() - 1000 };
+
+		// Both reads return the same refresh token, so nothing else refreshed it — a real expiry,
+		// and the dead token should be discarded.
+		let deleted = false;
+		const kv = {
+			get: async (key: string) => (key === KV_KEYS.TOKEN ? JSON.stringify(expired) : null),
+			put: async () => {},
+			delete: async (key: string) => {
+				if (key === KV_KEYS.TOKEN) deleted = true;
+			},
+		} as unknown as KVNamespace;
+
+		fetchMock.get('https://accounts.spotify.com').intercept({ path: '/api/token', method: 'POST' }).reply(400, { error: 'invalid_grant' });
+
+		await expect(getValidToken(kv, 'client-id')).rejects.toThrow('re-authentication required');
+
+		expect(deleted).toBe(true);
+		fetchMock.assertNoPendingInterceptors();
 	});
 });
 
