@@ -1,7 +1,7 @@
 import { env, createExecutionContext, waitOnExecutionContext, fetchMock } from 'cloudflare:test';
 import { describe, it, expect, beforeAll } from 'vitest';
 import worker from '../src/index';
-import { notifyServiceDown } from '../src/modules/notifier';
+import { notifyServiceDown, markServiceRecovered } from '../src/modules/notifier';
 import { KV_KEYS } from '../src/constants';
 
 // For now, you'll need to do something like this to get a correctly-typed
@@ -88,6 +88,23 @@ describe('now-playing route', () => {
 	});
 });
 
+describe('routing', () => {
+	it('returns 404 for non-root paths without running the backend or alerting', async () => {
+		// A bot scanning for secrets. Net connect is disabled, so any backend or webhook fetch
+		// would throw; and the notifier claims the cooldown timestamp before it posts, so if the
+		// notifier had run, DISCORD_LAST_ALERT would be set. Neither happens for a 404.
+		await env.KV.put(KV_KEYS.DISCORD_WEBHOOK, 'https://discord.example/webhook');
+
+		const request = new IncomingRequest('https://spotify.example/.env');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(404);
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+	});
+});
+
 describe('discord notifier', () => {
 	it('is a no-op when DISCORD_WEBHOOK_URL is unset', async () => {
 		await notifyServiceDown(env.KV, 'down');
@@ -125,6 +142,44 @@ describe('discord notifier', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(401);
+		fetchMock.assertNoPendingInterceptors();
+	});
+
+	it('claims the cooldown window before sending, so a failed POST still throttles', async () => {
+		await env.KV.put(KV_KEYS.DISCORD_WEBHOOK, 'https://discord.example/webhook');
+		fetchMock.get('https://discord.example').intercept({ path: '/webhook', method: 'POST' }).reply(500, '');
+
+		await notifyServiceDown(env.KV, 'down');
+
+		// Timestamp is written before the POST, so even a 500 leaves the window claimed.
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).not.toBeNull();
+		fetchMock.assertNoPendingInterceptors();
+	});
+
+	it('markServiceRecovered clears an active outage marker (and is a no-op otherwise)', async () => {
+		await markServiceRecovered(env.KV); // no-op when nothing is set
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+
+		await env.KV.put(KV_KEYS.DISCORD_LAST_ALERT, Date.now().toString());
+		await markServiceRecovered(env.KV);
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+	});
+
+	it('alerts again on a new outage after recovery, even within the cooldown window', async () => {
+		await env.KV.put(KV_KEYS.DISCORD_WEBHOOK, 'https://discord.example/webhook');
+
+		fetchMock.get('https://discord.example').intercept({ path: '/webhook', method: 'POST' }).reply(204, '');
+		await notifyServiceDown(env.KV, 'down');
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).not.toBeNull();
+
+		// Service comes back → marker cleared.
+		await markServiceRecovered(env.KV);
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+
+		// A brand-new outage seconds later still alerts (not swallowed by the 24h cooldown).
+		fetchMock.get('https://discord.example').intercept({ path: '/webhook', method: 'POST' }).reply(204, '');
+		await notifyServiceDown(env.KV, 'down again');
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).not.toBeNull();
 		fetchMock.assertNoPendingInterceptors();
 	});
 

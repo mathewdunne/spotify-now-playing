@@ -68,7 +68,7 @@ Self-service OAuth Authorization Code + PKCE flow (public client — `client_id`
 3. **`redirect_uri`** is derived at runtime from the request origin (`${url.origin}/callback`), so it works on both prod and local dev. Each registered `redirect_uri` must be added in the Spotify Developer Dashboard.
 4. **Scope**: `user-read-currently-playing` (see `OAUTH.SCOPES` in `src/constants.ts`).
 
-**Protection**: `/login` and `/callback` are protected by **Cloudflare Access** (Zero Trust) at the edge — there is no in-worker auth for them, so the worker is exposed only on the Access-protected custom domain (`workers_dev`/`preview_urls` are disabled in `wrangler.jsonc` to close the bypass). The `state` check still runs regardless, as CSRF protection. The default `/` endpoint stays public.
+**Protection**: `/login` and `/callback` are protected by **Cloudflare Access** (Zero Trust) at the edge — there is no in-worker auth for them, so the worker is exposed only on the Access-protected custom domain (`workers_dev`/`preview_urls` are disabled in `wrangler.jsonc` to close the bypass). The `state` check still runs regardless, as CSRF protection. The default `/` endpoint stays public; every **other** path (e.g. bot scans for `/.env`) returns a cheap `404` *before* any KV/token/Spotify work, so junk traffic can't drive backend errors or alert storms.
 
 ### Down Alerts (Discord)
 
@@ -76,7 +76,7 @@ Self-service OAuth Authorization Code + PKCE flow (public client — `client_id`
 
 - **Webhook URL**: read from the KV value `discord_webhook_url`. If unset, alerting is a silent no-op.
 - **Trigger**: any error caught in the main handler (auth/reauth, Spotify API, or unexpected). The two-tier cache absorbs transient blips before they reach the error path, keeping noise low.
-- **Throttle**: at most one alert per 24h (`ALERT.COOLDOWN_MS`), tracked via the KV value `discord_last_alert` (timestamp recorded only after a successful send).
+- **Throttle**: alerts on the healthy→down transition, then at most once per 24h (`ALERT.COOLDOWN_MS`) while the outage persists, tracked via the KV value `discord_last_alert`. The timestamp is claimed **before** the webhook POST (not after a successful send): KV has no atomic test-and-set, so writing first collapses the check→send→write race that previously let a burst of concurrent failures each post an alert. `markServiceRecovered` (called on the next healthy response) deletes `discord_last_alert`, so a brand-new outage alerts immediately instead of being swallowed by the cooldown. A rare duplicate is still possible under exact-simultaneous failures (the accepted trade-off for not using a Durable Object); the root-only routing is what removes the main source of concurrent failures.
 - **Fire-and-forget**: dispatched via `ctx.waitUntil(...)` so it adds no latency; the notifier never throws into the request path.
 - **Hostname tagging**: each message is prefixed with the request hostname (e.g. `⚠️ [spotify.mathewdunne.ca] ...`) so multiple deployments self-identify in a shared channel. Re-auth/auth messages include the `/login` URL.
 
@@ -121,7 +121,7 @@ Implementation in `src/modules/cache.ts`. Main logic orchestrated in `src/index.
 
 ## Response Format
 
-The public now-playing endpoint is the default route (`/`); `/login` and `/callback` are the Access-protected admin routes. A `GET /` returns:
+The public now-playing endpoint is served only at `/`; `/login` and `/callback` are the Access-protected admin routes, and any other path returns `404` (`{ "error": "Not found" }`) without touching the backend. A `GET /` returns:
 
 ```typescript
 {
@@ -146,6 +146,7 @@ All responses include CORS header `Access-Control-Allow-Origin: *`.
 The API returns appropriate HTTP status codes:
 
 - **200 OK**: Successful response (track playing or nothing playing)
+- **404 Not Found**: Any path other than `/` (e.g. bot scans) — returned before any backend work
 - **401 Unauthorized**: Authentication/token errors (no token found, token refresh failed)
 - **500 Internal Server Error**: Unexpected errors (parsing errors, network failures)
 - **503 Service Unavailable**: Spotify API errors (API is down or returning errors)
