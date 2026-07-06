@@ -87,6 +87,33 @@ describe('now-playing route', () => {
 		expect(await response.json()).toMatchObject({ title: 'Song', artist: 'Artist', isPlaying: true });
 		fetchMock.assertNoPendingInterceptors();
 	});
+
+	it('does not alert on a transient Spotify API error (only auth failures are actionable)', async () => {
+		await env.KV.put(KV_KEYS.DISCORD_WEBHOOK, 'https://discord.example/webhook');
+		await env.KV.put(
+			KV_KEYS.TOKEN,
+			JSON.stringify({
+				access_token: 'at',
+				token_type: 'Bearer',
+				expires_in: 3600,
+				refresh_token: 'rt',
+				expires: Date.now() + 3600_000,
+			})
+		);
+
+		// Spotify returns a 5xx → SpotifyApiError → 503. Net connect is disabled and the notifier
+		// claims DISCORD_LAST_ALERT before posting, so if it had alerted the marker would be set.
+		fetchMock.get('https://api.spotify.com').intercept({ path: '/v1/me/player/currently-playing', method: 'GET' }).reply(503, '');
+
+		const request = new IncomingRequest('https://spotify.example/');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(503);
+		expect(await env.KV.get(KV_KEYS.DISCORD_LAST_ALERT)).toBeNull();
+		fetchMock.assertNoPendingInterceptors();
+	});
 });
 
 describe('routing', () => {

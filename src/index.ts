@@ -6,10 +6,11 @@ import { handleLogin, handleCallback } from './modules/auth';
 import { notifyServiceDown, markServiceRecovered } from './modules/notifier';
 import { AuthenticationError, ReauthRequiredError, SpotifyApiError } from './types/errors';
 
-// Builds the Discord message for a caught backend error. Each message is tagged with the
-// request's hostname so multiple deployments self-identify in a shared channel. Auth
-// failures include the /login URL so the fix is one click away.
-function buildAlertMessage(error: unknown, request: Request): string {
+// Builds the Discord message for an actionable auth failure (the only error we alert on —
+// see the fetch handler). Each message is tagged with the request's hostname so multiple
+// deployments self-identify in a shared channel, and includes the /login URL so the fix is
+// one click away.
+function buildAlertMessage(error: AuthenticationError, request: Request): string {
 	const url = new URL(request.url);
 	const host = url.hostname;
 	const loginUrl = `${url.origin}/login`;
@@ -17,13 +18,7 @@ function buildAlertMessage(error: unknown, request: Request): string {
 	if (error instanceof ReauthRequiredError) {
 		return `⚠️ [${host}] Spotify now-playing: refresh token expired. Re-authenticate: ${loginUrl}`;
 	}
-	if (error instanceof AuthenticationError) {
-		return `⚠️ [${host}] Spotify now-playing auth error: ${error.message}. Re-authenticate: ${loginUrl}`;
-	}
-	if (error instanceof SpotifyApiError) {
-		return `⚠️ [${host}] Spotify now-playing: ${error.message}`;
-	}
-	return `⚠️ [${host}] Spotify now-playing: ${error instanceof Error ? error.message : 'Failed to fetch data'}`;
+	return `⚠️ [${host}] Spotify now-playing auth error: ${error.message}. Re-authenticate: ${loginUrl}`;
 }
 
 // The public now-playing pipeline: serve fresh cache, otherwise fetch from Spotify (refreshing
@@ -100,11 +95,13 @@ export default {
 		} catch (error) {
 			console.error('Spotify Fetch Error:', error);
 
-			// Alert on any backend failure (fire-and-forget, throttled inside the notifier).
-			ctx.waitUntil(notifyServiceDown(env.KV, buildAlertMessage(error, request)));
-
-			// Handle authentication errors (401)
+			// Only alert on auth failures — those are actionable (re-authenticate via /login).
+			// Spotify API errors (429/502/503) and other transient failures are one-off blips the
+			// two-tier cache already absorbs; they need no intervention, so they don't alert.
 			if (error instanceof AuthenticationError) {
+				// Fire-and-forget, throttled inside the notifier.
+				ctx.waitUntil(notifyServiceDown(env.KV, buildAlertMessage(error, request)));
+
 				return createResponse({ isPlaying: false, error: error.message }, 401);
 			}
 
