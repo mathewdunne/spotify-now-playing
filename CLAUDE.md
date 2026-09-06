@@ -35,8 +35,8 @@ npm run cf-typegen
 
 The codebase is organized into distinct modules for separation of concerns:
 
-- **`src/index.ts`**: Main worker orchestration layer. Routes requests (`/login`, `/callback`, default now-playing) and coordinates caching, token management, API calls, and alerting.
-- **`src/modules/cache.ts`**: Two-tier caching system implementation.
+- **`src/index.ts`**: Routing gateway (`/login`, `/callback`, `/`, 404) plus the `NowPlaying` entrypoint, which coordinates caching, token management, API calls, and alerting. The split exists because Workers Caching is configured per entrypoint, not per path.
+- **`src/modules/cache.ts`**: KV caching system implementation (fresh/stale tiers and the write-dedup).
 - **`src/modules/token-manager.ts`**: Manual token refresh logic (no SDK dependency), including `invalid_grant` handling and the shared `toAccessToken` helper.
 - **`src/modules/spotify-client.ts`**: Direct Spotify API communication.
 - **`src/modules/response-formatter.ts`**: Response construction and data transformation.
@@ -80,23 +80,32 @@ Self-service OAuth Authorization Code + PKCE flow (public client — `client_id`
 - **Fire-and-forget**: dispatched via `ctx.waitUntil(...)` so it adds no latency; the notifier never throws into the request path.
 - **Hostname tagging**: each message is prefixed with the request hostname (e.g. `⚠️ [spotify.mathewdunne.ca] ...`) so multiple deployments self-identify in a shared channel. Re-auth/auth messages include the `/login` URL.
 
-### Two-Tier Caching Strategy
+### Caching Strategy
 
-**CRITICAL**: This caching logic must be preserved exactly as-is. It prevents showing "not playing" during brief pauses or network issues.
+Two layers with different jobs. The edge layer absorbs polling; KV exists for the stale fallback.
 
-**Fresh Cache (< 20 seconds)**:
+**Edge cache (Workers Caching, 20s)**:
+- Enabled on the `NowPlaying` entrypoint only, via `cache` + `exports` in `wrangler.jsonc`. It is read-through: on a hit the Worker does not execute at all, so a polling widget reaches neither KV nor Spotify.
+- Free and unmetered, and it collapses concurrent requests for the same key.
+- The gateway rebuilds the forwarded request from a fixed URL (`/`, no query string, no headers). The forwarded request *is* the cache key, so a frontend polling `/?t=<now>` would otherwise miss every time, and an `Authorization` header would force an automatic bypass.
+- Caching cannot be scoped by path, which is why `/login` and `/callback` stay on the uncached default entrypoint — a stored PKCE redirect would hand a later visitor someone else's `state`. Failures are returned `no-store`, so a cached `401` can't outlive the re-auth that fixes it.
+
+**KV cache — fresh tier (< 20 seconds)**:
 - Returns cached data immediately without hitting Spotify API.
-- Minimizes API calls and improves response time.
 
-**Stale Cache (20 seconds - 20 minutes)**:
+**KV cache — stale tier (20 seconds - 20 minutes)**:
 - Attempts fresh API call.
 - If Spotify returns "nothing playing" OR non-track content (podcast) → returns stale cache.
-- Prevents showing "not playing" during brief pauses, private sessions, or network issues.
+- **CRITICAL**: this fallback prevents showing "not playing" during brief pauses, private sessions, or network issues. Preserve it.
 
-**Expired Cache (> 20 minutes)**:
+**KV cache — expired (> 20 minutes)**:
 - Attempts fresh API call.
 - If nothing playing → returns `{isPlaying: false}`.
 - If error → returns `{isPlaying: false, error: '...'}`.
+
+**Write dedup (the free-tier budget)**: KV allows 1,000 writes/day on the free plan. Track and timestamp live in **one** key (`{ track, ts }`) — they used to be two, so every cache miss cost two writes — and `setCachedTrack` **skips the write entirely** when the same track is already stored and the entry is younger than `CACHE_CONFIG.HEARTBEAT_MS` (5 min). That decouples the write rate from the request rate: writes now track song *changes* (~17/hour of listening) rather than polls (~285/hour before this, which exhausted the daily budget in about 3.5 hours). `index.ts` must keep passing the entry it just read into `setCachedTrack` or the dedup silently stops working.
+
+The trade-off is stale-window precision: the window is measured from the last write, so a pause can fall back on a track for as little as `STALE_TTL_MS - HEARTBEAT_MS` (15 min) rather than the full 20. The heartbeat re-write is what stops an unchanged track from aging out of the stale window entirely.
 
 Implementation in `src/modules/cache.ts`. Main logic orchestrated in `src/index.ts`.
 
@@ -106,7 +115,7 @@ Implementation in `src/modules/cache.ts`. Main logic orchestrated in `src/index.
 - Bound to KV namespace ID: `275d13a658b84a098a91a7679210b963`
 - Stores (keys centralized in `src/constants.ts` `KV_KEYS`):
   - `spotify_token`: the access/refresh token object
-  - `spotify_song_cache` / `spotify_song_cache_timestamp`: cached track data + timestamp
+  - `spotify_song_cache`: cached track data + write timestamp, as one `{ track, ts }` value
   - `spotify_auth_pending`: short-lived PKCE state + verifier during the `/login` flow
   - `discord_webhook_url`: Discord webhook URL for alerts (**set manually**; no-op if absent)
   - `discord_last_alert`: timestamp of the last Discord alert (written by the worker, for throttling)
@@ -116,8 +125,9 @@ Implementation in `src/modules/cache.ts`. Main logic orchestrated in `src/index.
 
 **Configuration**: `wrangler.jsonc` (JSONC format, not JSON)
 - `workers_dev: false` and `preview_urls: false`: the worker is reachable only on the Cloudflare Access-protected custom domain, so `/login` and `/callback` can't be hit via an unprotected `*.workers.dev` URL.
+- `cache: { enabled: true }` + `exports`: turns on Workers Caching for the `NowPlaying` entrypoint and explicitly **off** for `default` (the router). Requires wrangler ≥ 4.69 and a compatibility date ≥ 2026-07-06.
 
-**Testing**: Uses `@cloudflare/vitest-pool-workers` to run tests in Cloudflare Workers environment with access to KV bindings.
+**Testing**: Uses `@cloudflare/vitest-plugin` (v1, formerly `@cloudflare/vitest-pool-workers`) on Vitest 4 to run tests in the Workers runtime with real KV bindings. `fetchMock` no longer exists in `cloudflare:test`; outbound requests are routed through a small `globalThis.fetch` stub at the top of `test/index.spec.ts`, which throws on any unrouted request (several tests rely on that to prove a path made no request). Note that `waitOnExecutionContext()` drains only the gateway's context — work the `NowPlaying` entrypoint dispatches via `waitUntil()` has to be polled for.
 
 ## Response Format
 

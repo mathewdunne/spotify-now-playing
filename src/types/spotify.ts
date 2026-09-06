@@ -49,5 +49,7 @@ export interface TrackInfo {
 
 export interface CachedTrack {
 	data: TrackInfo;
+	// When the entry was written to KV — not when the track was last seen playing.
+	ts: number;
 	isFresh: boolean;
 }

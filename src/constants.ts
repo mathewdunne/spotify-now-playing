@@ -1,15 +1,16 @@
 export const KV_KEYS = {
 	TOKEN: 'spotify_token',
 	SONG_CACHE: 'spotify_song_cache',
-	SONG_CACHE_TIMESTAMP: 'spotify_song_cache_timestamp',
 	AUTH_PENDING: 'spotify_auth_pending',
 	DISCORD_WEBHOOK: 'discord_webhook_url',
 	DISCORD_LAST_ALERT: 'discord_last_alert',
 } as const;
 
 export const CACHE_CONFIG = {
-	FRESH_TTL_MS: 5 * 1000, // 5 seconds
+	FRESH_TTL_MS: 20 * 1000, // 20 seconds
 	STALE_TTL_MS: 20 * 60 * 1000, // 20 minutes
+	HEARTBEAT_MS: 5 * 60 * 1000, // how often an unchanged track is re-written to KV
+	EDGE_TTL_S: 20, // Workers Caching TTL for a now-playing response
 } as const;
 
 export const SPOTIFY_API = {

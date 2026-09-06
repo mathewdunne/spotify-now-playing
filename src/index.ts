@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import { getCachedTrack, setCachedTrack } from './modules/cache';
 import { getValidToken } from './modules/token-manager';
 import { getCurrentlyPlaying } from './modules/spotify-client';
@@ -5,11 +6,12 @@ import { createResponse, formatTrackInfo } from './modules/response-formatter';
 import { handleLogin, handleCallback } from './modules/auth';
 import { notifyServiceDown, markServiceRecovered } from './modules/notifier';
 import { AuthenticationError, ReauthRequiredError, SpotifyApiError } from './types/errors';
+import { CACHE_CONFIG } from './constants';
 
-// Builds the Discord message for an actionable auth failure (the only error we alert on —
-// see the fetch handler). Each message is tagged with the request's hostname so multiple
-// deployments self-identify in a shared channel, and includes the /login URL so the fix is
-// one click away.
+// Builds the Discord message for an actionable auth failure (the only error we alert on — see
+// the NowPlaying entrypoint below). Each message is tagged with the request's hostname so
+// multiple deployments self-identify in a shared channel, and includes the /login URL so the
+// fix is one click away.
 function buildAlertMessage(error: AuthenticationError, request: Request): string {
 	const url = new URL(request.url);
 	const host = url.hostname;
@@ -58,9 +60,60 @@ async function handleNowPlaying(env: Env): Promise<Response> {
 		return createResponse({ isPlaying: false });
 	}
 
-	// Cache and return the track
-	await setCachedTrack(env.KV, trackInfo, now);
+	// Passing `cached` lets setCachedTrack skip the write when the song hasn't changed.
+	await setCachedTrack(env.KV, trackInfo, now, cached);
 	return createResponse(trackInfo);
+}
+
+// Workers Caching is enabled for this entrypoint only (see `exports` in wrangler.jsonc). It
+// can't be scoped by path, hence the split: a cached /login would leak one visitor's PKCE state.
+export class NowPlaying extends WorkerEntrypoint<Env> {
+	async fetch(request: Request): Promise<Response> {
+		try {
+			const response = await handleNowPlaying(this.env);
+
+			// A clean response means the backend is healthy; clear any active-outage marker so
+			// the next failure alerts as a fresh transition (fire-and-forget, never throws).
+			this.ctx.waitUntil(markServiceRecovered(this.env.KV));
+
+			response.headers.set('Cache-Control', `public, max-age=${CACHE_CONFIG.EDGE_TTL_S}`);
+			return response;
+		} catch (error) {
+			console.error('Spotify Fetch Error:', error);
+
+			// Only alert on auth failures — those are actionable (re-authenticate via /login).
+			// Spotify API errors (429/502/503) and other transient failures are one-off blips the
+			// two-tier cache already absorbs; they need no intervention, so they don't alert.
+			if (error instanceof AuthenticationError) {
+				// Fire-and-forget, throttled inside the notifier.
+				this.ctx.waitUntil(notifyServiceDown(this.env.KV, buildAlertMessage(error, request)));
+
+				return uncacheable(createResponse({ isPlaying: false, error: error.message }, 401));
+			}
+
+			// Handle Spotify API errors (503 for service issues)
+			if (error instanceof SpotifyApiError) {
+				return uncacheable(createResponse({ isPlaying: false, error: error.message }, 503));
+			}
+
+			// Handle all other errors (500)
+			return uncacheable(
+				createResponse(
+					{
+						isPlaying: false,
+						error: error instanceof Error ? error.message : 'Failed to fetch data',
+					},
+					500
+				)
+			);
+		}
+	}
+}
+
+// A cached 401 would outlive the re-auth that fixes it.
+function uncacheable(response: Response): Response {
+	response.headers.set('Cache-Control', 'no-store');
+	return response;
 }
 
 export default {
@@ -83,41 +136,9 @@ export default {
 			return createResponse({ error: 'Not found' }, 404);
 		}
 
-		// Default route: public now-playing endpoint.
-		try {
-			const response = await handleNowPlaying(env);
-
-			// A clean response means the backend is healthy; clear any active-outage marker so
-			// the next failure alerts as a fresh transition (fire-and-forget, never throws).
-			ctx.waitUntil(markServiceRecovered(env.KV));
-
-			return response;
-		} catch (error) {
-			console.error('Spotify Fetch Error:', error);
-
-			// Only alert on auth failures — those are actionable (re-authenticate via /login).
-			// Spotify API errors (429/502/503) and other transient failures are one-off blips the
-			// two-tier cache already absorbs; they need no intervention, so they don't alert.
-			if (error instanceof AuthenticationError) {
-				// Fire-and-forget, throttled inside the notifier.
-				ctx.waitUntil(notifyServiceDown(env.KV, buildAlertMessage(error, request)));
-
-				return createResponse({ isPlaying: false, error: error.message }, 401);
-			}
-
-			// Handle Spotify API errors (503 for service issues)
-			if (error instanceof SpotifyApiError) {
-				return createResponse({ isPlaying: false, error: error.message }, 503);
-			}
-
-			// Handle all other errors (500)
-			return createResponse(
-				{
-					isPlaying: false,
-					error: error instanceof Error ? error.message : 'Failed to fetch data',
-				},
-				500
-			);
-		}
+		// The forwarded request *is* the cache key, so rebuild it from a fixed URL: a `?t=<now>`
+		// cache-buster would otherwise miss every time, and Authorization forces a bypass.
+		const key = new Request(new URL('/', request.url).toString(), { method: 'GET' });
+		return ctx.exports.NowPlaying.fetch(key);
 	},
 } satisfies ExportedHandler<Env>;

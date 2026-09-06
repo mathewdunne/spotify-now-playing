@@ -6,7 +6,16 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "spotify-now-playing",
 	"main": "src/index.ts",
-	"compatibility_date": "2025-11-28",
+	"compatibility_date": "2026-07-06",
+	/**
+	 * Workers Caching is per-entrypoint, not per-path: on for NowPlaying, off for the router
+	 * that serves /login and /callback, whose PKCE redirects must never be cached.
+	 */
+	"cache": { "enabled": true },
+	"exports": {
+		"default": { "type": "worker", "cache": { "enabled": false } },
+		"NowPlaying": { "type": "worker", "cache": { "enabled": true } }
+	},
 	/**
 	 * Only expose the worker on the Cloudflare Access-protected custom domain
 	 * (spotify.mathewdunne.ca). Disabling the workers.dev and preview URLs closes the
